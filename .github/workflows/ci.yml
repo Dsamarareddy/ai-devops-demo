@@ -1,4 +1,4 @@
-name: CI/CD for .NET 8 Web API to Azure Container Apps
+name: CI/CD for React TypeScript App
 
 on:
   push:
@@ -7,53 +7,54 @@ on:
     branches: [main]
 
 jobs:
-  build-test-deploy:
+  build-and-deploy:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup .NET 8
-        uses: actions/setup-dotnet@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
         with:
-          dotnet-version: '8.0.x'
+          node-version: '18'
 
-      - name: Restore dependencies
-        run: dotnet restore
+      - name: Install dependencies
+        run: npm ci
 
-      - name: Build
-        run: dotnet build --no-restore --configuration Release
+      - name: Run lint
+        run: npm run lint
 
       - name: Run unit tests
-        run: dotnet test --no-build --configuration Release --verbosity normal
+        run: npm test -- --ci --coverage
 
-      - name: Log in to Azure Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ secrets.AZURE_CONTAINER_REGISTRY }}
-          username: ${{ secrets.AZURE_CONTAINER_REGISTRY_USERNAME }}
-          password: ${{ secrets.AZURE_CONTAINER_REGISTRY_PASSWORD }}
+      - name: Build production bundle
+        run: npm run build
 
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v5
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
         with:
-          context: .
-          push: true
-          tags: ${{ secrets.AZURE_CONTAINER_REGISTRY }}/dotnet8-webapi:latest
+          name: build
+          path: build
 
-      - name: Azure Login
-        uses: azure/login@v2
+      - name: Deploy to AWS S3
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: jakejarvis/s3-sync-action@v0.5.1
         with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          args: --delete
+        env:
+          AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          SOURCE_DIR: build
 
-      - name: Deploy to Azure Container Apps
-        uses: azure/CLI@v2
+      - name: Invalidate CloudFront Cache
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: chetan/invalidate-cloudfront-action@v2
         with:
-          inlineScript: |
-            az containerapp update \
-              --name ${{ secrets.AZURE_CONTAINERAPP_NAME }} \
-              --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
-              --image ${{ secrets.AZURE_CONTAINER_REGISTRY }}/dotnet8-webapi:latest \
-              --environment ${{ secrets.AZURE_CONTAINERAPPS_ENVIRONMENT }}
+          distribution-id: ${{ secrets.CLOUDFRONT_DISTRIBUTION_ID }}
+          paths: '/*'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
