@@ -1,0 +1,143 @@
+stages:
+  - .pre
+  - build
+  - test
+  - deploy
+  - .post
+
+variables:
+  NODE_ENV: production
+  AWS_DEFAULT_REGION: $AWS_DEFAULT_REGION
+  EKS_CLUSTER_NAME: $EKS_CLUSTER_NAME
+  KUBE_NAMESPACE: $KUBE_NAMESPACE
+
+before_script:
+  - echo "Installing dependencies..."
+  - npm ci
+
+.pre-validate:
+  stage: .pre
+  script:
+    - echo "Validating environment variables..."
+    - |
+      for var in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_DEFAULT_REGION EKS_CLUSTER_NAME KUBE_NAMESPACE; do
+        if [ -z "${!var}" ]; then
+          echo "Missing required variable: $var" && exit 1
+        fi
+      done
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "merge_request_event"'
+  artifacts:
+    expire_in: 1 hour
+    paths:
+      - node_modules/
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}
+    paths:
+      - node_modules/
+
+build:
+  stage: build
+  script:
+    - echo "Building the Express app..."
+    - npm run build || echo "No build script, skipping."
+  artifacts:
+    paths:
+      - node_modules/
+      - dist/
+    expire_in: 1 hour
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}
+    paths:
+      - node_modules/
+  needs:
+    - .pre-validate
+  rules:
+    - if: '$CI_COMMIT_BRANCH'
+
+unit_test:
+  stage: test
+  script:
+    - echo "Running tests..."
+    - npm test
+  dependencies:
+    - build
+  artifacts:
+    when: always
+    reports:
+      junit: junit.xml
+    paths:
+      - coverage/
+      - junit.xml
+    expire_in: 1 hour
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}
+    paths:
+      - node_modules/
+  rules:
+    - if: '$CI_COMMIT_BRANCH'
+
+containerize:
+  stage: build
+  image: docker:latest
+  services:
+    - docker:dind
+  script:
+    - echo "Building Docker image..."
+    - docker build -t $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA .
+    - docker push $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA
+  dependencies:
+    - build
+  artifacts:
+    expire_in: 1 hour
+    paths:
+      - node_modules/
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}
+    paths:
+      - node_modules/
+  rules:
+    - if: '$CI_COMMIT_BRANCH'
+
+deploy:
+  stage: deploy
+  image: amazon/aws-cli:2.0.52
+  before_script:
+    - echo "Configuring AWS CLI..."
+    - aws configure set aws_access_key_id $AWS_ACCESS_KEY_ID
+    - aws configure set aws_secret_access_key $AWS_SECRET_ACCESS_KEY
+    - aws configure set default.region $AWS_DEFAULT_REGION
+    - echo "Installing kubectl..."
+    - curl -LO https://storage.googleapis.com/kubernetes-release/release/$(curl -s https://storage.googleapis.com/kubernetes-release/release/stable.txt)/bin/linux/amd64/kubectl
+    - chmod +x ./kubectl
+    - mv ./kubectl /usr/local/bin/kubectl
+  script:
+    - echo "Updating kubeconfig for EKS..."
+    - aws eks update-kubeconfig --name $EKS_CLUSTER_NAME --region $AWS_DEFAULT_REGION
+    - echo "Deploying to EKS..."
+    - kubectl apply -n $KUBE_NAMESPACE -f k8s/
+  dependencies:
+    - containerize
+  environment:
+    name: production
+    url: https://$EKS_CLUSTER_NAME.eks.amazonaws.com
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      when: manual
+  only:
+    - main
+  artifacts:
+    expire_in: 1 hour
+    paths:
+      - node_modules/
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}
+    paths:
+      - node_modules/
+
+.post-cleanup:
+  stage: .post
+  script:
+    - echo "Cleanup after pipeline..."
+  rules:
+    - when: always
