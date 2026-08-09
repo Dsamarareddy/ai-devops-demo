@@ -1,0 +1,161 @@
+
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: build-js-express-app
+spec:
+  workspaces:
+    - name: source
+  params:
+    - name: image-tag
+      type: string
+      description: Docker image tag to build and push
+  results:
+    - name: image-digest
+      description: Digest of the built image
+  steps:
+    - name: build-image
+      image: docker:24.0.7
+      script: |
+        #!/bin/sh
+        docker build -t $(params.image-tag) .
+        docker push $(params.image-tag)
+        digest=$(docker inspect --format='{{index .RepoDigests 0}}' $(params.image-tag))
+        echo -n "$digest" > $(results.image-digest.path)
+      resources:
+        limits:
+          cpu: "1"
+          memory: 1Gi
+        requests:
+          cpu: "0.5"
+          memory: 512Mi
+      workingDir: $(workspaces.source.path)
+---
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: test-js-express-app
+spec:
+  workspaces:
+    - name: source
+  steps:
+    - name: install-deps
+      image: node:20.11.1
+      script: |
+        #!/bin/sh
+        npm ci
+      resources:
+        limits:
+          cpu: "1"
+          memory: 1Gi
+        requests:
+          cpu: "0.5"
+          memory: 512Mi
+      workingDir: $(workspaces.source.path)
+    - name: run-tests
+      image: node:20.11.1
+      script: |
+        #!/bin/sh
+        npm test
+      resources:
+        limits:
+          cpu: "1"
+          memory: 1Gi
+        requests:
+          cpu: "0.5"
+          memory: 512Mi
+      workingDir: $(workspaces.source.path)
+---
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: deploy-to-eks
+spec:
+  workspaces:
+    - name: source
+  params:
+    - name: image-tag
+      type: string
+      description: Docker image tag to deploy
+    - name: image-digest
+      type: string
+      description: Digest of the built image
+    - name: aws-region
+      type: string
+      description: AWS region for EKS
+    - name: cluster-name
+      type: string
+      description: EKS cluster name
+  steps:
+    - name: deploy
+      image: bitnami/kubectl:1.28.7
+      script: |
+        #!/bin/sh
+        aws eks update-kubeconfig --region $(params.aws-region) --name $(params.cluster-name)
+        kubectl apply -f k8s/
+      env:
+        - name: AWS_REGION
+          value: $(params.aws-region)
+        - name: CLUSTER_NAME
+          value: $(params.cluster-name)
+      resources:
+        limits:
+          cpu: "1"
+          memory: 1Gi
+        requests:
+          cpu: "0.5"
+          memory: 512Mi
+      workingDir: $(workspaces.source.path)
+---
+apiVersion: tekton.dev/v1beta1
+kind: Pipeline
+metadata:
+  name: build-test-deploy-js-express
+spec:
+  workspaces:
+    - name: shared-workspace
+  params:
+    - name: image-tag
+      type: string
+      description: Docker image tag to build and deploy
+    - name: aws-region
+      type: string
+      description: AWS region for EKS
+    - name: cluster-name
+      type: string
+      description: EKS cluster name
+  tasks:
+    - name: build
+      taskRef:
+        name: build-js-express-app
+      workspaces:
+        - name: source
+          workspace: shared-workspace
+      params:
+        - name: image-tag
+          value: $(params.image-tag)
+    - name: test
+      taskRef:
+        name: test-js-express-app
+      runAfter:
+        - build
+      workspaces:
+        - name: source
+          workspace: shared-workspace
+    - name: deploy
+      taskRef:
+        name: deploy-to-eks
+      runAfter:
+        - test
+      workspaces:
+        - name: source
+          workspace: shared-workspace
+      params:
+        - name: image-tag
+          value: $(params.image-tag)
+        - name: image-digest
+          value: $(tasks.build.results.image-digest)
+        - name: aws-region
+          value: $(params.aws-region)
+        - name: cluster-name
+          value: $(params.cluster-name)
