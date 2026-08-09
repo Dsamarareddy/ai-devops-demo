@@ -1,0 +1,127 @@
+
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: build-test-deploy-express-app
+spec:
+  params:
+    - name: IMAGE
+      type: string
+      description: Docker image name (including tag)
+    - name: AWS_REGION
+      type: string
+      description: AWS region for EKS
+    - name: EKS_CLUSTER_NAME
+      type: string
+      description: EKS cluster name
+    - name: K8S_MANIFEST_PATH
+      type: string
+      description: Path to Kubernetes manifests
+      default: k8s/
+  workspaces:
+    - name: source
+      description: The workspace containing the source code
+  results:
+    - name: image-digest
+      description: The digest of the built image
+  steps:
+    - name: npm-install
+      image: node:18.19.0
+      workingDir: $(workspaces.source.path)
+      script: |
+        npm install
+      resources:
+        requests:
+          cpu: "250m"
+          memory: "512Mi"
+        limits:
+          cpu: "500m"
+          memory: "1Gi"
+    - name: npm-test
+      image: node:18.19.0
+      workingDir: $(workspaces.source.path)
+      script: |
+        npm test
+      resources:
+        requests:
+          cpu: "250m"
+          memory: "512Mi"
+        limits:
+          cpu: "500m"
+          memory: "1Gi"
+    - name: docker-build-push
+      image: gcr.io/kaniko-project/executor:v1.17.0
+      workingDir: $(workspaces.source.path)
+      env:
+        - name: DOCKER_CONFIG
+          value: /tekton/home/.docker/
+      script: |
+        /kaniko/executor \
+          --dockerfile=Dockerfile \
+          --context=$(workspaces.source.path) \
+          --destination=$(params.IMAGE) \
+          --digest-file=$(results.image-digest.path)
+      resources:
+        requests:
+          cpu: "500m"
+          memory: "1Gi"
+        limits:
+          cpu: "1"
+          memory: "2Gi"
+    - name: deploy-to-eks
+      image: bitnami/kubectl:1.28.7
+      workingDir: $(workspaces.source.path)
+      env:
+        - name: AWS_REGION
+          value: $(params.AWS_REGION)
+        - name: EKS_CLUSTER_NAME
+          value: $(params.EKS_CLUSTER_NAME)
+      script: |
+        aws eks update-kubeconfig --region "$AWS_REGION" --name "$EKS_CLUSTER_NAME"
+        kubectl apply -f $(params.K8S_MANIFEST_PATH)
+      resources:
+        requests:
+          cpu: "250m"
+          memory: "512Mi"
+        limits:
+          cpu: "500m"
+          memory: "1Gi"
+---
+apiVersion: tekton.dev/v1beta1
+kind: Pipeline
+metadata:
+  name: build-test-deploy-express-app-pipeline
+spec:
+  params:
+    - name: IMAGE
+      type: string
+      description: Docker image name (including tag)
+    - name: AWS_REGION
+      type: string
+      description: AWS region for EKS
+    - name: EKS_CLUSTER_NAME
+      type: string
+      description: EKS cluster name
+    - name: K8S_MANIFEST_PATH
+      type: string
+      description: Path to Kubernetes manifests
+      default: k8s/
+  workspaces:
+    - name: source
+      description: The workspace containing the source code
+  tasks:
+    - name: build-and-test
+      taskRef:
+        name: build-test-deploy-express-app
+      params:
+        - name: IMAGE
+          value: $(params.IMAGE)
+        - name: AWS_REGION
+          value: $(params.AWS_REGION)
+        - name: EKS_CLUSTER_NAME
+          value: $(params.EKS_CLUSTER_NAME)
+        - name: K8S_MANIFEST_PATH
+          value: $(params.K8S_MANIFEST_PATH)
+      workspaces:
+        - name: source
+          workspace: source
