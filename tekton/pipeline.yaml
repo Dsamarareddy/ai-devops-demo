@@ -1,0 +1,186 @@
+
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: build-js-express-app
+spec:
+  workspaces:
+    - name: source
+  params:
+    - name: image-tag
+      type: string
+      description: Tag for the built Docker image
+  results:
+    - name: image-digest
+      description: Digest of the built Docker image
+  steps:
+    - name: npm-install
+      image: node:18.18.2
+      resources:
+        limits:
+          cpu: "1"
+          memory: 1Gi
+        requests:
+          cpu: "0.5"
+          memory: 512Mi
+      workingDir: $(workspaces.source.path)
+      script: |
+        npm install
+    - name: npm-build
+      image: node:18.18.2
+      resources:
+        limits:
+          cpu: "1"
+          memory: 1Gi
+        requests:
+          cpu: "0.5"
+          memory: 512Mi
+      workingDir: $(workspaces.source.path)
+      script: |
+        if [ -f package.json ] && grep -q '"build"' package.json; then
+          npm run build
+        else
+          echo "No build script, skipping."
+        fi
+    - name: docker-build-push
+      image: docker:24.0.7
+      resources:
+        limits:
+          cpu: "2"
+          memory: 2Gi
+        requests:
+          cpu: "1"
+          memory: 1Gi
+      workingDir: $(workspaces.source.path)
+      env:
+        - name: DOCKER_BUILDKIT
+          value: "1"
+      script: |
+        echo "$DOCKER_CONFIG_JSON" | docker login -u "$DOCKER_USERNAME" --password-stdin $DOCKER_REGISTRY
+        docker build -t $DOCKER_REGISTRY/$DOCKER_IMAGE:$(params.image-tag) .
+        docker push $DOCKER_REGISTRY/$DOCKER_IMAGE:$(params.image-tag)
+        digest=$(docker inspect --format='{{index .RepoDigests 0}}' $DOCKER_REGISTRY/$DOCKER_IMAGE:$(params.image-tag) | cut -d'@' -f2)
+        echo -n "$digest" > $(results.image-digest.path)
+---
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: test-js-express-app
+spec:
+  workspaces:
+    - name: source
+  steps:
+    - name: npm-test
+      image: node:18.18.2
+      resources:
+        limits:
+          cpu: "1"
+          memory: 1Gi
+        requests:
+          cpu: "0.5"
+          memory: 512Mi
+      workingDir: $(workspaces.source.path)
+      script: |
+        npm test
+---
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: deploy-to-eks
+spec:
+  workspaces:
+    - name: source
+  params:
+    - name: image-tag
+      type: string
+      description: Tag for the Docker image to deploy
+    - name: image-digest
+      type: string
+      description: Digest of the built Docker image
+    - name: aws-region
+      type: string
+      description: AWS region for EKS
+    - name: cluster-name
+      type: string
+      description: EKS cluster name
+  steps:
+    - name: kubectl-deploy
+      image: bitnami/kubectl:1.28.7
+      resources:
+        limits:
+          cpu: "1"
+          memory: 1Gi
+        requests:
+          cpu: "0.5"
+          memory: 512Mi
+      workingDir: $(workspaces.source.path)
+      env:
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: aws-credentials
+              key: aws_access_key_id
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: aws-credentials
+              key: aws_secret_access_key
+        - name: AWS_DEFAULT_REGION
+          value: $(params.aws-region)
+      script: |
+        aws eks update-kubeconfig --region $(params.aws-region) --name $(params.cluster-name)
+        # Optionally, update image in k8s manifests here using sed or kustomize
+        kubectl apply -f k8s/
+---
+apiVersion: tekton.dev/v1beta1
+kind: Pipeline
+metadata:
+  name: build-test-deploy-js-express
+spec:
+  workspaces:
+    - name: shared-workspace
+  params:
+    - name: image-tag
+      type: string
+      description: Tag for the Docker image
+    - name: aws-region
+      type: string
+      description: AWS region for EKS
+    - name: cluster-name
+      type: string
+      description: EKS cluster name
+  tasks:
+    - name: build
+      taskRef:
+        name: build-js-express-app
+      workspaces:
+        - name: source
+          workspace: shared-workspace
+      params:
+        - name: image-tag
+          value: $(params.image-tag)
+    - name: test
+      taskRef:
+        name: test-js-express-app
+      runAfter:
+        - build
+      workspaces:
+        - name: source
+          workspace: shared-workspace
+    - name: deploy
+      taskRef:
+        name: deploy-to-eks
+      runAfter:
+        - test
+      workspaces:
+        - name: source
+          workspace: shared-workspace
+      params:
+        - name: image-tag
+          value: $(params.image-tag)
+        - name: image-digest
+          value: $(tasks.build.results.image-digest)
+        - name: aws-region
+          value: $(params.aws-region)
+        - name: cluster-name
+          value: $(params.cluster-name)
