@@ -1,0 +1,35 @@
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: express-app-eks
+  namespace: argocd
+spec:
+  project: eks-apps
+  source:
+    repoURL: https://github.com/your-org/express-app.git
+    targetRevision: main
+    path: k8s-manifests
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: express-app
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+#
+# Note:
+# - This manifest assumes your Kubernetes manifests (Deployment, Service, etc.) are in the 'k8s-manifests' directory of your repo.
+# - The Application is assigned to the 'eks-apps' AppProject for access control.
+# - Automated sync, pruning, and self-healing are enabled.
+# - Namespace 'express-app' will be created if it does not exist.
+# - No PreSync/PostSync hooks are defined as the intent does not mention DB migrations or multi-step deployment.
+# - Ensure your Deployment manifest includes readiness/liveness probes for proper ArgoCD health assessment.
