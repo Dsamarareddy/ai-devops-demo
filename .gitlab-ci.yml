@@ -1,0 +1,126 @@
+stages:
+  - .pre
+  - build
+  - test
+  - deploy
+  - .post
+
+variables:
+  NODE_ENV: production
+  AWS_DEFAULT_REGION: $AWS_DEFAULT_REGION
+  EKS_CLUSTER_NAME: $EKS_CLUSTER_NAME
+
+before_script:
+  - echo "Setting up environment..."
+  - node --version
+  - npm --version
+
+.pre:setup:
+  stage: .pre
+  script:
+    - echo "Validating required environment variables..."
+    - |
+      for var in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_DEFAULT_REGION EKS_CLUSTER_NAME; do
+        if [ -z "${!var}" ]; then
+          echo "$var is not set!" && exit 1;
+        fi
+      done
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "merge_request_event"'
+  artifacts:
+    paths: []
+  cache:
+    key: setup
+    paths: []
+
+build:
+  stage: build
+  image: node:18
+  script:
+    - npm ci
+    - npm run build || echo "No build script defined, skipping."
+  artifacts:
+    paths:
+      - node_modules/
+      - dist/
+    expire_in: 1 hour
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}
+    paths:
+      - node_modules/
+  needs: [ '.pre:setup' ]
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "merge_request_event"'
+
+
+unit_test:
+  stage: test
+  image: node:18
+  script:
+    - npm ci
+    - npm test
+  artifacts:
+    when: always
+    reports:
+      junit: junit.xml
+    paths:
+      - junit.xml
+      - coverage/
+    expire_in: 1 hour
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}
+    paths:
+      - node_modules/
+  needs: [ 'build' ]
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push" || $CI_PIPELINE_SOURCE == "merge_request_event"'
+
+
+deploy:
+  stage: deploy
+  image:
+    name: amazon/aws-cli:2.13.14
+    entrypoint: ['']
+  before_script:
+    - apk add --no-cache curl python3 py3-pip
+    - pip3 install --upgrade pip
+    - pip3 install kubernetes
+    - aws --version
+    - curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+    - install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+    - kubectl version --client
+    - export KUBECONFIG=$CI_PROJECT_DIR/kubeconfig
+  script:
+    - echo "Configuring AWS credentials..."
+    - export AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID
+    - export AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY
+    - export AWS_DEFAULT_REGION=$AWS_DEFAULT_REGION
+    - aws sts get-caller-identity
+    - echo "Updating kubeconfig for EKS cluster $EKS_CLUSTER_NAME..."
+    - aws eks update-kubeconfig --name $EKS_CLUSTER_NAME --region $AWS_DEFAULT_REGION
+    - echo "Deploying to EKS..."
+    - kubectl apply -f k8s/
+  environment:
+    name: production
+    url: https://$EKS_CLUSTER_NAME.eks.amazonaws.com
+  dependencies:
+    - unit_test
+  rules:
+    - if: '$CI_COMMIT_REF_NAME == "main"'
+  artifacts:
+    paths: []
+  cache:
+    key: deploy
+    paths: []
+
+.post:cleanup:
+  stage: .post
+  script:
+    - echo "Pipeline finished for commit $CI_COMMIT_SHA on branch $CI_COMMIT_REF_NAME."
+  rules:
+    - when: always
+  artifacts:
+    paths: []
+  cache:
+    key: cleanup
+    paths: []
