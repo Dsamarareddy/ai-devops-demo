@@ -1,0 +1,33 @@
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: express-app-eks
+  namespace: argocd
+spec:
+  project: eks-apps
+  source:
+    repoURL: https://github.com/your-org/express-app.git  # <-- Update to your repo
+    targetRevision: main
+    path: k8s-manifests  # <-- Update to the directory containing your manifests
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: express-app
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 3m
+#
+# Note:
+# - If your app depends on a database or other resources, add manifests with
+#   'argocd.argoproj.io/sync-wave' annotations to control ordering.
+# - If you have a migration Job, annotate it with a PreSync hook.
+# - Ensure your Deployment defines readiness/liveness probes for health assessment.
