@@ -1,0 +1,142 @@
+stages:
+  - .pre
+  - build
+  - test
+  - deploy
+  - .post
+
+variables:
+  NODE_ENV: production
+  AWS_DEFAULT_REGION: $AWS_DEFAULT_REGION
+  EKS_CLUSTER_NAME: $EKS_CLUSTER_NAME
+
+before_script:
+  - echo "Setting up Node.js environment"
+  - node --version
+  - npm --version
+  - npm ci
+
+.pre:setup:
+  stage: .pre
+  script:
+    - echo "Pre-build checks..."
+    - test -f package.json || (echo "Missing package.json" && exit 1)
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+  artifacts:
+    paths: []
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}
+    paths:
+      - node_modules/
+
+build:
+  stage: build
+  script:
+    - echo "Building the Express app..."
+    - npm run build || echo "No build script, skipping."
+    - mkdir -p dist && cp -r * dist/ || true
+  artifacts:
+    paths:
+      - dist/
+    expire_in: 1 hour
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}
+    paths:
+      - node_modules/
+  needs:
+    - job: .pre:setup
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+
+unit_test:
+  stage: test
+  script:
+    - echo "Running tests..."
+    - npm test
+  artifacts:
+    when: always
+    reports:
+      junit: junit.xml
+    paths:
+      - junit.xml
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}
+    paths:
+      - node_modules/
+  needs:
+    - job: build
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+
+# Docker image build and push (optional, inferred from docker: true)
+docker_build:
+  stage: build
+  image: docker:latest
+  services:
+    - docker:dind
+  variables:
+    DOCKER_DRIVER: overlay2
+  script:
+    - echo "Building Docker image..."
+    - docker build -t $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA .
+    - echo "$CI_JOB_TOKEN" | docker login -u gitlab-ci-token --password-stdin $CI_REGISTRY
+    - docker push $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA
+  artifacts:
+    paths: []
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}
+    paths:
+      - node_modules/
+  needs:
+    - job: build
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+
+# Deploy to AWS EKS
+deploy:
+  stage: deploy
+  image:
+    name: amazon/aws-cli:2.15.28
+    entrypoint: ['']
+  before_script:
+    - apk add --no-cache curl bash git python3 py3-pip
+    - pip3 install --upgrade pip
+    - pip3 install kubernetes
+    - aws --version
+    - export KUBECONFIG=$CI_PROJECT_DIR/kubeconfig
+  script:
+    - echo "Configuring AWS credentials..."
+    - aws configure set aws_access_key_id $AWS_ACCESS_KEY_ID
+    - aws configure set aws_secret_access_key $AWS_SECRET_ACCESS_KEY
+    - aws configure set region $AWS_DEFAULT_REGION
+    - echo "Updating kubeconfig for EKS cluster $EKS_CLUSTER_NAME..."
+    - aws eks update-kubeconfig --name $EKS_CLUSTER_NAME --region $AWS_DEFAULT_REGION
+    - echo "Deploying to EKS..."
+    - kubectl apply -f k8s/
+  environment:
+    name: production
+    url: https://$EKS_CLUSTER_NAME.eks.amazonaws.com
+  dependencies:
+    - docker_build
+  rules:
+    - if: '$CI_COMMIT_REF_NAME == "main"'
+  artifacts:
+    paths: []
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}
+    paths:
+      - node_modules/
+
+.post:notify:
+  stage: .post
+  script:
+    - echo "Pipeline finished for $CI_COMMIT_REF_NAME ($CI_COMMIT_SHA)"
+  rules:
+    - when: always
+  artifacts:
+    paths: []
+  cache:
+    key: ${CI_COMMIT_REF_SLUG}
+    paths:
+      - node_modules/
